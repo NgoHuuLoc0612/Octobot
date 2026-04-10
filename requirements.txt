@@ -1,0 +1,20 @@
+# ─── Core ────────────────────────────────────────────────────────────────────
+discord.py
+python-dotenv
+aiohttp
+
+# ─── Database ────────────────────────────────────────────────────────────────
+sqlalchemy
+aiosqlite
+# For PostgreSQL (optional):
+# asyncpg>=0.29.0
+
+# ─── Visualizations ──────────────────────────────────────────────────────────
+plotly
+kaleido
+numpy
+scipy
+networkx
+
+# ─── Utilities ───────────────────────────────────────────────────────────────
+cryptography
