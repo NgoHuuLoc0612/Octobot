@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="Ub5jT.jpg" width="120"/><br/>
+  <b>Octobot</b>
+</p>
 # 🐙 Octobot — GitHub Bot for Discord
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
