@@ -1,4 +1,4 @@
-# 🐙 Octobot — Enterprise GitHub Bot for Discord
+# 🐙 Octobot — GitHub Bot for Discord
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
 [![discord.py 2.3+](https://img.shields.io/badge/discord.py-2.3%2B-5865F2)](https://discordpy.readthedocs.io)
