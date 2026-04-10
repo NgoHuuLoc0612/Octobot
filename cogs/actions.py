@@ -267,5 +267,135 @@ class ActionsCog(commands.Cog, name="Actions"):
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+    @app_commands.command(name="workflow", description="Show details of a specific workflow by name or ID")
+    @app_commands.describe(repository="owner/repo", workflow="Workflow file name or numeric ID")
+    async def workflow_detail(
+        self, interaction: discord.Interaction, repository: str, workflow: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+
+        try:
+            # Try numeric ID first, then treat as filename
+            wid: int | str = int(workflow) if workflow.isdigit() else workflow
+            data = await self._gh(interaction.user.id).get_workflow(owner, repo, wid)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Workflow `{workflow}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        state_map = {
+            "active": ("✅", Colors.SUCCESS),
+            "deleted": ("🗑️", Colors.DANGER),
+            "disabled_manually": ("⛔", Colors.WARNING),
+            "disabled_inactivity": ("💤", Colors.NEUTRAL),
+        }
+        state = data.get("state", "unknown")
+        emoji, color = state_map.get(state, ("❓", Colors.NEUTRAL))
+
+        embed = discord.Embed(
+            title=f"{Emojis.WORKFLOW} {data.get('name', 'Workflow')}",
+            url=data.get("html_url", ""),
+            color=color,
+        )
+        embed.add_field(name="📄 File Path", value=f"`{data.get('path', 'N/A')}`", inline=True)
+        embed.add_field(name="🆔 ID", value=f"`{data.get('id', 'N/A')}`", inline=True)
+        embed.add_field(name="⚡ State", value=f"{emoji} {state.replace('_', ' ').title()}", inline=True)
+        embed.add_field(name="📅 Created", value=fmt_iso_date(data.get("created_at"), "F"), inline=True)
+        embed.add_field(name="🔄 Updated", value=fmt_iso_date(data.get("updated_at"), "R"), inline=True)
+        embed.set_footer(text=f"{owner}/{repo}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="workflow-jobs", description="List jobs in a specific workflow run")
+    @app_commands.describe(repository="owner/repo", run_id="Workflow run ID")
+    async def workflow_jobs(
+        self, interaction: discord.Interaction, repository: str, run_id: int
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+
+        try:
+            jobs = await self._gh(interaction.user.id).get_workflow_run_jobs(owner, repo, run_id)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Run `{run_id}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not jobs:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No jobs found for this run.", color=Colors.NEUTRAL)
+            )
+
+        from utils.helpers import fmt_duration, workflow_status_emoji
+
+        def fmt_job(j: dict, idx: int) -> str:
+            name = j.get("name", "?")
+            conclusion = j.get("conclusion")
+            status = j.get("status", "unknown")
+            emoji = workflow_status_emoji(status, conclusion)
+            started = j.get("started_at")
+            completed = j.get("completed_at")
+            duration = ""
+            if started and completed:
+                from datetime import datetime
+                try:
+                    s = datetime.fromisoformat(started.replace("Z", "+00:00"))
+                    c = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                    duration = f" · ⏱️ {fmt_duration((c - s).total_seconds())}"
+                except Exception:
+                    pass
+            steps = j.get("steps", [])
+            url = j.get("html_url", "")
+            return (
+                f"`{idx:>2}.` {emoji} [{name}]({url}){duration}\n"
+                f"       🔩 {len(steps)} step(s) · Runner: `{j.get('runner_name') or 'N/A'}`"
+            )
+
+        embeds = build_list_embeds(
+            title=f"🔧 Jobs — Run #{run_id} · {owner}/{repo}",
+            items=jobs,
+            formatter=fmt_job,
+            color=Colors.SECONDARY,
+            per_page=8,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="job-logs", description="Get the logs download URL for a workflow job")
+    @app_commands.describe(repository="owner/repo", job_id="Job ID (from workflow-jobs command)")
+    async def job_logs(
+        self, interaction: discord.Interaction, repository: str, job_id: int
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)), ephemeral=True)
+
+        try:
+            url = await self._gh(interaction.user.id).get_job_logs_url(owner, repo, job_id)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Job `{job_id}` not found."), ephemeral=True)
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)), ephemeral=True)
+
+        embed = discord.Embed(
+            title=f"📋 Job Logs — Job #{job_id}",
+            color=Colors.NEUTRAL,
+        )
+        if url:
+            embed.description = f"[📥 Download Logs]({url})\n\n*Link expires after a short time.*"
+        else:
+            embed.description = "Logs are not available (job may still be running or logs have expired)."
+        embed.set_footer(text=f"{owner}/{repo}")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+
 async def setup(bot) -> None:
     await bot.add_cog(ActionsCog(bot))

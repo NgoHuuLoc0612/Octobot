@@ -674,7 +674,7 @@ class RepositoryCog(commands.Cog, name="Repository"):
 
         embed = discord.Embed(
             title=f"📈 Traffic — {owner}/{repo}",
-            color=Colors.TRENDING,
+            color=Colors.SECONDARY,
             url=f"https://github.com/{owner}/{repo}/graphs/traffic",
         )
         embed.add_field(
@@ -708,6 +708,458 @@ class RepositoryCog(commands.Cog, name="Repository"):
             ]
             embed.add_field(name="📂 Popular Paths", value="\n".join(path_lines), inline=False)
 
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="watchers", description="List users watching a repository")
+    @app_commands.describe(repository="owner/repo")
+    async def watchers(self, interaction: discord.Interaction, repository: str) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            data = await self._gh(interaction.user.id).get_repo_watchers(owner, repo, max_results=50)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"`{repository}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not data:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No watchers found.", color=Colors.NEUTRAL)
+            )
+
+        def fmt_watcher(w: dict, idx: int) -> str:
+            login = w.get("login", "?")
+            url = w.get("html_url", "")
+            wtype = w.get("type", "User")
+            return f"`{idx:>2}.` {Emojis.USER} [@{login}]({url}) ({wtype})"
+
+        embeds = build_list_embeds(
+            title=f"👁️ Watchers — {owner}/{repo}",
+            items=data,
+            formatter=fmt_watcher,
+            color=Colors.SECONDARY,
+            per_page=15,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="repo-hooks", description="List webhooks configured for a repository (requires admin)")
+    @app_commands.describe(repository="owner/repo")
+    async def repo_hooks(self, interaction: discord.Interaction, repository: str) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)), ephemeral=True)
+        try:
+            hooks = await self._gh(interaction.user.id).list_repo_webhooks(owner, repo)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"`{repository}` not found."), ephemeral=True)
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)), ephemeral=True)
+
+        embed = discord.Embed(
+            title=f"🔗 Webhooks — {owner}/{repo}",
+            color=Colors.NEUTRAL,
+        )
+        if hooks:
+            lines = []
+            for i, h in enumerate(hooks[:20]):
+                config = h.get("config", {})
+                url_val = config.get("url", "N/A")
+                active = "✅" if h.get("active") else "❌"
+                events = ", ".join(h.get("events", [])[:5])
+                insecure = " ⚠️ insecure_ssl" if config.get("insecure_ssl") == "1" else ""
+                lines.append(
+                    f"`{i+1}.` {active} `{url_val[:55]}`{insecure}\n"
+                    f"       Events: `{events or 'none'}`"
+                )
+            embed.description = "\n".join(lines)
+        else:
+            embed.description = "No webhooks configured (may require admin access)."
+        embed.set_footer(text="Shown only to you • Requires repo admin access")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="repo-projects", description="List GitHub Projects for a repository")
+    @app_commands.describe(repository="owner/repo", state="Project state filter")
+    @app_commands.choices(state=[
+        app_commands.Choice(name="Open", value="open"),
+        app_commands.Choice(name="Closed", value="closed"),
+        app_commands.Choice(name="All", value="all"),
+    ])
+    async def repo_projects(
+        self, interaction: discord.Interaction, repository: str, state: str = "open"
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            projects = await self._gh(interaction.user.id).get_repo_projects(owner, repo, state=state)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"`{repository}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not projects:
+            return await interaction.followup.send(
+                embed=discord.Embed(description=f"No {state} projects found.", color=Colors.NEUTRAL)
+            )
+
+        def fmt_project(p: dict, idx: int) -> str:
+            name = p.get("name", "?")
+            number = p.get("number", "?")
+            body = p.get("body") or ""
+            url = p.get("html_url", "")
+            updated = fmt_iso_date(p.get("updated_at"), "R")
+            desc_part = f"\n       {body[:60]}…" if len(body) > 60 else (f"\n       {body}" if body else "")
+            return f"`{idx:>2}.` [**#{number} {name}**]({url}){desc_part}\n       🔄 {updated}"
+
+        embeds = build_list_embeds(
+            title=f"📋 Projects — {owner}/{repo}",
+            items=projects,
+            formatter=fmt_project,
+            color=Colors.SECONDARY,
+            per_page=8,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="contents", description="Browse directory contents of a repository")
+    @app_commands.describe(repository="owner/repo", path="Directory path (default: root)", ref="Branch or tag (default: default branch)")
+    async def contents(
+        self, interaction: discord.Interaction, repository: str, path: str = "", ref: str = None
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            items = await self._gh(interaction.user.id).get_repo_contents(owner, repo, path or "/", ref=ref)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Path `{path or '/'}` not found in `{repository}`."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        # API may return a single file dict instead of a list
+        if isinstance(items, dict):
+            items = [items]
+
+        # Sort: dirs first, then files
+        items = sorted(items, key=lambda x: (0 if x.get("type") == "dir" else 1, x.get("name", "").lower()))
+
+        type_emoji = {"dir": "📁", "file": "📄", "symlink": "🔗", "submodule": "📦"}
+
+        def fmt_item(item: dict, idx: int) -> str:
+            itype = item.get("type", "file")
+            name = item.get("name", "?")
+            size = item.get("size", 0)
+            url = item.get("html_url", "")
+            emoji = type_emoji.get(itype, "📄")
+            size_str = f" · {fmt_bytes(size)}" if itype == "file" and size else ""
+            return f"`{idx:>2}.` {emoji} [{name}]({url}){size_str}"
+
+        display_path = path or "/"
+        ref_str = f" @ `{ref}`" if ref else ""
+        embeds = build_list_embeds(
+            title=f"📂 Contents — {owner}/{repo}:{display_path}{ref_str}",
+            items=items,
+            formatter=fmt_item,
+            color=Colors.SECONDARY,
+            per_page=20,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="branch", description="Show detailed info about a specific branch")
+    @app_commands.describe(repository="owner/repo", branch="Branch name")
+    async def branch_detail(
+        self, interaction: discord.Interaction, repository: str, branch: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            data = await self._gh(interaction.user.id).get_branch(owner, repo, branch)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Branch `{branch}` not found in `{repository}`."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        commit = data.get("commit", {})
+        commit_data = commit.get("commit", {})
+        author = commit_data.get("author", {})
+        protection = data.get("protection", {})
+        is_protected = data.get("protected", False)
+
+        embed = discord.Embed(
+            title=f"🌿 Branch — {branch}",
+            url=f"https://github.com/{owner}/{repo}/tree/{branch}",
+            color=Colors.PRIMARY,
+        )
+        embed.add_field(name="🔒 Protected", value="Yes" if is_protected else "No", inline=True)
+        embed.add_field(name="📝 Latest Commit", value=f"`{commit.get('sha', '?')[:7]}`", inline=True)
+        embed.add_field(name="👤 Author", value=author.get("name", "N/A"), inline=True)
+        embed.add_field(name="📅 Committed", value=fmt_iso_date(author.get("date"), "R"), inline=True)
+
+        msg = commit_data.get("message", "")
+        if msg:
+            embed.add_field(name="💬 Message", value=msg.split("\n")[0][:100], inline=False)
+
+        if is_protected and protection:
+            checks = protection.get("required_status_checks", {})
+            pr_reviews = protection.get("required_pull_request_reviews", {})
+            rules = []
+            if checks.get("strict"):
+                rules.append("✅ Branch must be up-to-date before merging")
+            if pr_reviews:
+                n = pr_reviews.get("required_approving_review_count", 1)
+                rules.append(f"👥 Requires {n} approving review(s)")
+            if protection.get("enforce_admins", {}).get("enabled"):
+                rules.append("🛡️ Rules enforced for admins")
+            if rules:
+                embed.add_field(name="🛡️ Protection Rules", value="\n".join(rules), inline=False)
+
+        embed.set_footer(text=f"{owner}/{repo}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="commit-status", description="Show CI/CD status checks for a commit or branch")
+    @app_commands.describe(repository="owner/repo", ref="Branch name, tag, or commit SHA")
+    async def commit_status(
+        self, interaction: discord.Interaction, repository: str, ref: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            gh = self._gh(interaction.user.id)
+            status = await gh._request("GET", f"/repos/{owner}/{repo}/commits/{ref}/status")
+            check_runs_data = await gh._request("GET", f"/repos/{owner}/{repo}/commits/{ref}/check-runs")
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Ref `{ref}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        overall = status.get("state", "unknown")
+        state_color = {
+            "success": Colors.SUCCESS, "failure": Colors.DANGER,
+            "pending": Colors.WARNING, "error": Colors.DANGER,
+        }.get(overall, Colors.NEUTRAL)
+        state_emoji = {
+            "success": "✅", "failure": "❌", "pending": "⏳", "error": "🔴",
+        }.get(overall, "❓")
+
+        embed = discord.Embed(
+            title=f"🔍 Status — {ref[:12]}",
+            url=f"https://github.com/{owner}/{repo}/commits/{ref}",
+            color=state_color,
+        )
+        embed.add_field(name="Overall", value=f"{state_emoji} **{overall.title()}**", inline=True)
+
+        # Commit statuses
+        statuses = status.get("statuses", [])
+        if statuses:
+            status_lines = []
+            for s in statuses[:8]:
+                s_state = s.get("state", "?")
+                s_emoji = {"success": "✅", "failure": "❌", "pending": "⏳", "error": "🔴"}.get(s_state, "❓")
+                context = s.get("context", "?")
+                desc = s.get("description", "")
+                url = s.get("target_url", "")
+                line = f"{s_emoji} [{context}]({url})" if url else f"{s_emoji} `{context}`"
+                if desc:
+                    line += f"\n  *{desc[:60]}*"
+                status_lines.append(line)
+            embed.add_field(name=f"📊 Status Checks ({len(statuses)})", value="\n".join(status_lines), inline=False)
+
+        # Check runs (GitHub Actions)
+        check_runs = check_runs_data.get("check_runs", [])
+        if check_runs:
+            from utils.helpers import workflow_status_emoji
+            run_lines = []
+            for cr in check_runs[:8]:
+                cr_status = cr.get("status", "unknown")
+                cr_conclusion = cr.get("conclusion")
+                cr_emoji = workflow_status_emoji(cr_status, cr_conclusion)
+                cr_name = cr.get("name", "?")
+                cr_url = cr.get("html_url", "")
+                run_lines.append(f"{cr_emoji} [{cr_name}]({cr_url})")
+            embed.add_field(name=f"⚡ Check Runs ({len(check_runs)})", value="\n".join(run_lines), inline=False)
+
+        embed.set_footer(text=f"{owner}/{repo}")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="code-frequency", description="Show weekly code additions/deletions statistics")
+    @app_commands.describe(repository="owner/repo")
+    async def code_frequency(
+        self, interaction: discord.Interaction, repository: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            data = await self._gh(interaction.user.id).get_code_frequency(owner, repo)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"`{repository}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not data:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No code frequency data available yet.", color=Colors.NEUTRAL)
+            )
+
+        # data = list of [timestamp, additions, deletions] — take last 12 weeks
+        recent = data[-12:] if len(data) > 12 else data
+        total_add = sum(w[1] for w in data if len(w) > 1)
+        total_del = sum(abs(w[2]) for w in data if len(w) > 2)
+
+        lines = []
+        for week in recent:
+            if len(week) < 3:
+                continue
+            ts, adds, dels = week[0], week[1], week[2]
+            dt = datetime.utcfromtimestamp(ts).strftime("%b %d")
+            add_bar = "█" * min(int(adds / max(total_add / 12 / 5, 1)), 10)
+            del_bar = "█" * min(int(abs(dels) / max(total_del / 12 / 5, 1)), 10)
+            lines.append(f"`{dt}` +{adds:,} {add_bar}  -{abs(dels):,} {del_bar}")
+
+        embed = discord.Embed(
+            title=f"📊 Code Frequency — {owner}/{repo}",
+            url=f"https://github.com/{owner}/{repo}/graphs/code-frequency",
+            description="\n".join(lines) if lines else "*No data*",
+            color=Colors.SECONDARY,
+        )
+        embed.add_field(name="📈 Total Additions", value=f"{total_add:,}", inline=True)
+        embed.add_field(name="📉 Total Deletions", value=f"{total_del:,}", inline=True)
+        embed.add_field(name="📐 Net Change", value=f"{total_add - total_del:+,}", inline=True)
+        embed.set_footer(text="Showing last 12 weeks • GitHub caches this data")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="participation", description="Show weekly commit participation (owner vs all contributors)")
+    @app_commands.describe(repository="owner/repo")
+    async def participation(
+        self, interaction: discord.Interaction, repository: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            data = await self._gh(interaction.user.id).get_participation_stats(owner, repo)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"`{repository}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        all_weeks = data.get("all", [])
+        owner_weeks = data.get("owner", [])
+
+        if not all_weeks:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No participation data available.", color=Colors.NEUTRAL)
+            )
+
+        total_all = sum(all_weeks)
+        total_owner = sum(owner_weeks)
+        total_community = total_all - total_owner
+        max_val = max(all_weeks) or 1
+
+        # Show last 16 weeks as mini bar chart
+        recent_all = all_weeks[-16:]
+        recent_owner = owner_weeks[-16:] if owner_weeks else [0] * 16
+        lines = []
+        for i, (a, o) in enumerate(zip(recent_all, recent_owner)):
+            bar_len = round(a / max_val * 12)
+            community = a - o
+            bar = "█" * bar_len
+            week_num = len(all_weeks) - 16 + i + 1
+            lines.append(f"W{week_num:02d} `{bar:<12}` {a:>3} (👑{o} / 👥{community})")
+
+        embed = discord.Embed(
+            title=f"📅 Participation — {owner}/{repo}",
+            url=f"https://github.com/{owner}/{repo}/graphs/commit-activity",
+            description="\n".join(lines),
+            color=Colors.PRIMARY,
+        )
+        embed.add_field(name="📝 Total (52w)", value=f"{total_all:,}", inline=True)
+        embed.add_field(name="👑 Owner", value=f"{total_owner:,}", inline=True)
+        embed.add_field(name="👥 Community", value=f"{total_community:,}", inline=True)
+        embed.set_footer(text="👑 = repo owner commits  👥 = all other contributors")
+        await interaction.followup.send(embed=embed)
+
+    @app_commands.command(name="punch-card", description="Show the best times to commit based on historical data")
+    @app_commands.describe(repository="owner/repo")
+    async def punch_card(
+        self, interaction: discord.Interaction, repository: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            owner, repo = parse_owner_repo(repository)
+        except ValueError as e:
+            return await interaction.followup.send(embed=build_error_embed("Invalid Format", str(e)))
+        try:
+            data = await self._gh(interaction.user.id).get_punch_card(owner, repo)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"`{repository}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not data:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No punch card data available.", color=Colors.NEUTRAL)
+            )
+
+        # data = list of [day, hour, commits] (day: 0=Sun, 6=Sat)
+        day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        day_totals: dict[int, int] = {}
+        hour_totals: dict[int, int] = {}
+        for entry in data:
+            if len(entry) < 3:
+                continue
+            d, h, c = entry
+            day_totals[d] = day_totals.get(d, 0) + c
+            hour_totals[h] = hour_totals.get(h, 0) + c
+
+        max_day = max(day_totals.values()) or 1
+        max_hour = max(hour_totals.values()) or 1
+
+        busiest_day = max(day_totals, key=day_totals.get)
+        busiest_hour = max(hour_totals, key=hour_totals.get)
+
+        day_lines = []
+        for d in range(7):
+            count = day_totals.get(d, 0)
+            bar = "█" * round(count / max_day * 12)
+            day_lines.append(f"`{day_names[d]}` `{bar:<12}` {count:,}")
+
+        hour_lines = []
+        for h in range(0, 24, 3):
+            count = sum(hour_totals.get(hh, 0) for hh in range(h, h + 3))
+            bar = "█" * round(count / max_hour / 3 * 10)
+            hour_lines.append(f"`{h:02d}-{h+2:02d}h` `{bar:<10}` {count:,}")
+
+        embed = discord.Embed(
+            title=f"🕐 Punch Card — {owner}/{repo}",
+            color=Colors.SECONDARY,
+        )
+        embed.add_field(name="📅 By Day", value="\n".join(day_lines), inline=True)
+        embed.add_field(name="🕒 By Hour (UTC)", value="\n".join(hour_lines), inline=True)
+        embed.add_field(
+            name="🏆 Peak Activity",
+            value=f"Day: **{day_names[busiest_day]}** · Hour: **{busiest_hour:02d}:00 UTC**",
+            inline=False,
+        )
+        embed.set_footer(text="All times in UTC")
         await interaction.followup.send(embed=embed)
 
 

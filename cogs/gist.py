@@ -120,5 +120,161 @@ class GistCog(commands.Cog, name="Gist"):
         await interaction.followup.send(embed=embed)
 
 
+    @app_commands.command(name="gist-comments", description="Show comments on a GitHub Gist")
+    @app_commands.describe(gist_id="Gist ID (from the URL)")
+    async def gist_comments(
+        self, interaction: discord.Interaction, gist_id: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            comments = await self._gh(interaction.user.id).get_gist_comments(gist_id)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Gist `{gist_id}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not comments:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No comments on this Gist.", color=Colors.NEUTRAL)
+            )
+
+        def fmt_comment(c: dict, idx: int) -> str:
+            user = c.get("user", {})
+            login = user.get("login", "unknown") if user else "unknown"
+            user_url = user.get("html_url", "") if user else ""
+            body = clean_body(c.get("body", ""), max_len=120)
+            created = fmt_iso_date(c.get("created_at"), "R")
+            return (
+                f"`{idx:>2}.` [@{login}]({user_url}) · {created}\n"
+                f"       {body}"
+            )
+
+        embeds = build_list_embeds(
+            title=f"💬 Comments — Gist `{gist_id[:8]}…`",
+            items=comments,
+            formatter=fmt_comment,
+            color=Colors.SECONDARY,
+            per_page=6,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="gist-forks", description="List forks of a GitHub Gist")
+    @app_commands.describe(gist_id="Gist ID (from the URL)")
+    async def gist_forks(
+        self, interaction: discord.Interaction, gist_id: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            forks = await self._gh(interaction.user.id).get_gist_forks(gist_id)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Gist `{gist_id}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not forks:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No forks found for this Gist.", color=Colors.NEUTRAL)
+            )
+
+        def fmt_fork(f: dict, idx: int) -> str:
+            user = f.get("user", {})
+            login = user.get("login", "?") if user else "?"
+            user_url = user.get("html_url", "") if user else ""
+            url = f.get("html_url", "")
+            created = fmt_iso_date(f.get("created_at"), "R")
+            updated = fmt_iso_date(f.get("updated_at"), "R")
+            forks_count = f.get("forks", 0)
+            return (
+                f"`{idx:>2}.` [@{login}]({user_url}) → [Fork]({url})\n"
+                f"       Created {created} · Updated {updated} · 🍴 {forks_count}"
+            )
+
+        embeds = build_list_embeds(
+            title=f"🍴 Forks — Gist `{gist_id[:8]}…`",
+            items=forks,
+            formatter=fmt_fork,
+            color=Colors.SECONDARY,
+            per_page=8,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="gist-history", description="Show revision history of a Gist")
+    @app_commands.describe(gist_id="Gist ID (from the URL)")
+    async def gist_history(
+        self, interaction: discord.Interaction, gist_id: str
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            commits = await self._gh(interaction.user.id).get_gist_commits(gist_id)
+        except NotFound:
+            return await interaction.followup.send(embed=build_error_embed("Not Found", f"Gist `{gist_id}` not found."))
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not commits:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No history found.", color=Colors.NEUTRAL)
+            )
+
+        def fmt_commit(c: dict, idx: int) -> str:
+            user = c.get("user", {})
+            login = user.get("login", "unknown") if user else "unknown"
+            sha = c.get("version", "?")[:7]
+            committed = fmt_iso_date(c.get("committed_at"), "R")
+            change = c.get("change_status", {})
+            additions = change.get("additions", 0)
+            deletions = change.get("deletions", 0)
+            total = change.get("total", 0)
+            return (
+                f"`{idx:>2}.` `{sha}` · @{login} · {committed}\n"
+                f"       +{additions} -{deletions} (total {total} changes)"
+            )
+
+        embeds = build_list_embeds(
+            title=f"📜 History — Gist `{gist_id[:8]}…`",
+            items=commits,
+            formatter=fmt_commit,
+            color=Colors.NEUTRAL,
+            per_page=8,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+    @app_commands.command(name="public-gists", description="Browse recent public Gists on GitHub")
+    async def public_gists(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            gists = await self._gh(interaction.user.id).get_public_gists(max_results=30)
+        except GitHubAPIError as e:
+            return await interaction.followup.send(embed=build_error_embed("API Error", str(e)))
+
+        if not gists:
+            return await interaction.followup.send(
+                embed=discord.Embed(description="No public Gists found.", color=Colors.NEUTRAL)
+            )
+
+        def fmt_gist(g: dict, idx: int) -> str:
+            owner = g.get("owner", {}) or {}
+            login = owner.get("login", "unknown")
+            desc = g.get("description") or "No description"
+            gid = g.get("id", "")
+            files = g.get("files", {})
+            fcount = len(files)
+            url = g.get("html_url", "")
+            updated = fmt_iso_date(g.get("updated_at"), "R")
+            return (
+                f"`{idx:>2}.` [@{login}]({url}) — {desc[:50]}\n"
+                f"       📄 {fcount} file(s) · {updated}"
+            )
+
+        embeds = build_list_embeds(
+            title=f"{Emojis.GIST} Public Gists — Recent",
+            items=gists,
+            formatter=fmt_gist,
+            color=Colors.SECONDARY,
+            per_page=8,
+        )
+        await send_paginated(interaction, embeds, interaction.user.id)
+
+
 async def setup(bot) -> None:
     await bot.add_cog(GistCog(bot))

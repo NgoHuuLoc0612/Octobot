@@ -1,5 +1,5 @@
 """
-Octobot - Enterprise-grade Discord bot for GitHub integration.
+Octobot - Discord bot for GitHub integration.
 Entry point and bot initialization.
 """
 
@@ -52,7 +52,7 @@ logging.getLogger("matplotlib").setLevel(logging.WARNING)
 
 class Octobot(commands.Bot):
     """
-    Octobot — The enterprise-grade GitHub companion for Discord.
+    Octobot — GitHub companion for Discord.
 
     Provides comprehensive GitHub integration including repository management,
     issue tracking, pull requests, CI/CD monitoring, advanced analytics,
@@ -76,7 +76,7 @@ class Octobot(commands.Bot):
             command_prefix=commands.when_mentioned_or(*config.prefixes),
             intents=intents,
             help_command=None,
-            description="Enterprise-grade GitHub bot for Discord",
+            description="GitHub bot for Discord",
             case_insensitive=True,
             strip_after_prefix=True,
             max_messages=10_000,
@@ -99,7 +99,6 @@ class Octobot(commands.Bot):
             "cogs.visualizations",
             "cogs.notifications",
             "cogs.admin",
-            "cogs.help",
         ]
         for module in cog_modules:
             try:
